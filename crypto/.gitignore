@@ -1,0 +1,6 @@
+# Generated development credentials. Regenerate with `make -C crypto certs`.
+certs/*.crt
+certs/*.key
+mldsa_certgen
+libhost_pqc.so
+

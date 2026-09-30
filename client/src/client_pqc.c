@@ -1,30 +1,99 @@
 /**
  * @file client_pqc.c
- * @brief Post-Quantum Cryptography IoT Client Implementation
+ * @brief Post-Quantum Cryptography IoT Client Implementation via wolfSSL DTLS 1.3
  */
 
 #include "client_pqc.h"
 #include "net_client.h"
-#include "pqc_kem.h"
-#include "aes_gcm.h"
+#include "../../common/mldsa_identity.h"
 
 #include <stdio.h>
 #include <string.h>
-#include <wolfssl/wolfcrypt/random.h>
 
+#include <wolfssl/options.h>
+#include <wolfssl/ssl.h>
+#include <wolfssl/wolfcrypt/error-crypt.h>
+
+static WOLFSSL_CTX *s_ctx = NULL;
+static WOLFSSL *s_ssl = NULL;
 static pqc_client_state_t s_state = PQC_CLIENT_STATE_INIT;
-static WC_RNG s_rng;
-static uint8_t s_shared_secret[PQC_KEM_SHARED_SECRET_SIZE];
 static uint32_t s_telemetry_counter = 0;
+
+/* Custom IO callbacks mapping wolfSSL to our bare-metal UDP driver */
+static int my_IO_Send(WOLFSSL* ssl, char* buf, int sz, void* ctx)
+{
+    (void)ssl;
+    (void)ctx;
+    int ret = net_client_send_raw(buf, sz);
+    if (ret < 0) {
+        return WOLFSSL_CBIO_ERR_WANT_WRITE;
+    }
+    return ret;
+}
+
+static int my_IO_Recv(WOLFSSL* ssl, char* buf, int sz, void* ctx)
+{
+    (void)ssl;
+    (void)ctx;
+    int ret = net_client_recv_raw(buf, sz);
+    if (ret < 0) {
+        return WOLFSSL_CBIO_ERR_WANT_READ;
+    }
+    return ret;
+}
 
 int client_pqc_init(void)
 {
-    int ret = pqc_kem_rng_init(&s_rng);
-    if (ret != 0) {
-        printf("[-] Failed to initialize RNG: %d\n", ret);
+    printf("[CLIENT] Initializing wolfSSL DTLS 1.3 Context...\n");
+    wolfSSL_Init();
+
+    s_ctx = wolfSSL_CTX_new(wolfDTLSv1_3_client_method());
+    if (!s_ctx) {
+        printf("[-] Failed to create WOLFSSL_CTX\n");
         s_state = PQC_CLIENT_STATE_ERROR;
-        return ret;
+        return -1;
     }
+
+    /* Configure cipher suite */
+    if (wolfSSL_CTX_set_cipher_list(s_ctx, "TLS_AES_256_GCM_SHA384") != WOLFSSL_SUCCESS) {
+        printf("[-] Failed to set cipher suite\n");
+        return -1;
+    }
+
+    /* Load ML-DSA Client Identity */
+    printf("[CLIENT] Loading ML-DSA-44 Identity...\n");
+    if (wolfSSL_CTX_use_certificate_buffer(s_ctx, g_client_mldsa_pubkey, sizeof(g_client_mldsa_pubkey), WOLFSSL_FILETYPE_ASN1) != WOLFSSL_SUCCESS) {
+        printf("[-] Failed to load client ML-DSA pubkey\n");
+        return -1;
+    }
+
+    if (wolfSSL_CTX_use_PrivateKey_buffer(s_ctx, g_client_mldsa_privkey, sizeof(g_client_mldsa_privkey), WOLFSSL_FILETYPE_ASN1) != WOLFSSL_SUCCESS) {
+        printf("[-] Failed to load client ML-DSA privkey\n");
+        return -1;
+    }
+
+    /* Configure Peer Verification (Gateway Server's ML-DSA cert) */
+    wolfSSL_CTX_set_verify(s_ctx, WOLFSSL_VERIFY_PEER, NULL);
+    if (wolfSSL_CTX_load_verify_buffer(s_ctx, g_server_mldsa_pubkey, sizeof(g_server_mldsa_pubkey), WOLFSSL_FILETYPE_ASN1) != WOLFSSL_SUCCESS) {
+        printf("[-] Failed to load Gateway CA ML-DSA pubkey\n");
+        return -1;
+    }
+
+    s_ssl = wolfSSL_new(s_ctx);
+    if (!s_ssl) {
+        printf("[-] Failed to create WOLFSSL object\n");
+        return -1;
+    }
+
+    /* Configure ML-KEM-512 Key Exchange */
+    if (wolfSSL_UseKeyShare(s_ssl, WOLFSSL_ML_KEM_512) != WOLFSSL_SUCCESS) {
+        printf("[-] Failed to set ML-KEM-512 KeyShare\n");
+        return -1;
+    }
+
+    /* Register Custom IO Callbacks */
+    wolfSSL_SetIOSend(s_ctx, my_IO_Send);
+    wolfSSL_SetIORecv(s_ctx, my_IO_Recv);
 
     s_state = PQC_CLIENT_STATE_DISCOVERY;
     return 0;
@@ -37,118 +106,81 @@ pqc_client_state_t client_pqc_get_state(void)
 
 int client_pqc_send_discovery(void)
 {
-    printf("[CLIENT] Sending Discovery Request to PQC Gateway...\n");
-    return net_client_send_msg(PQC_MSG_DISCOVERY_REQ, NULL, 0);
+    if (s_state != PQC_CLIENT_STATE_DISCOVERY && s_state != PQC_CLIENT_STATE_ENCAPSULATING) {
+        return -1;
+    }
+
+    printf("\n[CLIENT] Initiating DTLS 1.3 Handshake with ML-KEM and ML-DSA...\n");
+    s_state = PQC_CLIENT_STATE_ENCAPSULATING;
+    
+    int ret = wolfSSL_connect(s_ssl);
+    if (ret != WOLFSSL_SUCCESS) {
+        int err = wolfSSL_get_error(s_ssl, ret);
+        if (err == WOLFSSL_ERROR_WANT_READ || err == WOLFSSL_ERROR_WANT_WRITE) {
+            /* Non-blocking wait, normal */
+            return 0;
+        } else {
+            printf("[-] wolfSSL_connect failed: %d (err %d)\n", ret, err);
+            char err_buf[80];
+            wolfSSL_ERR_error_string(err, err_buf);
+            printf("[-] Reason: %s\n", err_buf);
+            s_state = PQC_CLIENT_STATE_ERROR;
+            return -1;
+        }
+    }
+
+    printf(">>> [CLIENT] DTLS 1.3 Session ESTABLISHED with Gateway! <<<\n");
+    
+    WOLFSSL_CIPHER *cipher = wolfSSL_get_current_cipher(s_ssl);
+    if (cipher) {
+        printf("    Cipher Suite: %s\n", wolfSSL_CIPHER_get_name(cipher));
+    }
+    
+    s_state = PQC_CLIENT_STATE_ESTABLISHED;
+    return 0;
 }
 
-void client_pqc_on_rx_msg(uint8_t msg_type,
-                          const uint8_t *payload,
-                          uint16_t payload_len,
-                          uint32_t seq_num)
+/* This replaces the old custom packet parser */
+void client_pqc_on_rx_msg(uint8_t msg_type, const uint8_t *payload, uint16_t payload_len, uint32_t seq_num)
 {
-    switch (msg_type) {
-    case PQC_MSG_KEM_PUBLIC_KEY: {
-        printf("\n[CLIENT] Received Gateway ML-KEM-512 Public Key (%u bytes, seq=%u)\n",
-               (unsigned int)payload_len, (unsigned int)seq_num);
-
-        if (payload_len != PQC_KEM_PUBLIC_KEY_SIZE) {
-            printf("[-] Invalid Public Key size: %u\n", (unsigned int)payload_len);
-            return;
-        }
-
-        s_state = PQC_CLIENT_STATE_ENCAPSULATING;
-
-        /* Encapsulate shared secret using Gateway's Public Key */
-        static uint8_t ciphertext[PQC_KEM_CIPHERTEXT_SIZE];
-        printf("[CLIENT] Encapsulating shared secret via ML-KEM-512...\n");
-
-        int ret = pqc_kem_encapsulate(payload,
-                                      payload_len,
-                                      ciphertext,
-                                      sizeof(ciphertext),
-                                      s_shared_secret,
-                                      sizeof(s_shared_secret),
-                                      &s_rng);
-        if (ret != 0) {
-            printf("[-] ML-KEM encapsulation failed: %d\n", ret);
-            s_state = PQC_CLIENT_STATE_ERROR;
-            return;
-        }
-
-        printf("[CLIENT] Derived 256-bit PQC Session Key: ");
-        for (int i = 0; i < 16; i++) printf("%02x", s_shared_secret[i]);
-        printf("...\n");
-
-        /* Send Ciphertext back to Gateway */
-        printf("[CLIENT] Transmitting KEM Ciphertext (%d bytes) to Gateway...\n",
-               PQC_KEM_CIPHERTEXT_SIZE);
-        net_client_send_msg(PQC_MSG_KEM_CIPHERTEXT, ciphertext, sizeof(ciphertext));
-
-        s_state = PQC_CLIENT_STATE_ESTABLISHED;
-        printf(">>> [CLIENT] PQC Secure Channel ESTABLISHED with Gateway! <<<\n\n");
-        break;
-    }
-
-    case PQC_MSG_ACK: {
-        if (payload_len >= sizeof(pqc_ack_msg_t)) {
-            const pqc_ack_msg_t *ack = (const pqc_ack_msg_t *)payload;
-            printf("[CLIENT] Received Gateway ACK (status=%u, ack_seq=%u)\n",
-                   (unsigned int)ack->status_code, (unsigned int)ack->ack_seq_num);
-        }
-        break;
-    }
-
-    default:
-        printf("[CLIENT] Received unhandled message type 0x%02x\n", msg_type);
-        break;
-    }
+    (void)msg_type;
+    (void)payload;
+    (void)payload_len;
+    (void)seq_num;
+    /* Handled by DTLS rx loop now */
 }
 
 int client_pqc_send_telemetry(const char *telemetry_str)
 {
     if (s_state != PQC_CLIENT_STATE_ESTABLISHED) {
-        printf("[-] Cannot send telemetry: secure channel not established\n");
+        /* Still handshaking? Drive the state machine forward */
+        if (s_state == PQC_CLIENT_STATE_ENCAPSULATING) {
+            client_pqc_send_discovery();
+        }
         return -1;
     }
 
     size_t plain_len = strlen(telemetry_str);
-    if (plain_len > 512) plain_len = 512;
-
-    /* Build secure payload: IV (12B) + Tag (16B) + Ciphertext */
-    uint8_t packet_buf[12 + 16 + 512];
-    uint8_t *iv = packet_buf;
-    uint8_t *tag = packet_buf + PQC_AES_GCM_IV_SIZE;
-    uint8_t *ciphertext = packet_buf + PQC_AES_GCM_IV_SIZE + PQC_AES_GCM_TAG_SIZE;
-
-    /* Generate random IV nonce */
-    int ret = wc_RNG_GenerateBlock(&s_rng, iv, PQC_AES_GCM_IV_SIZE);
-    if (ret != 0) {
-        printf("[-] Failed to generate IV nonce: %d\n", ret);
-        return ret;
-    }
-
-    /* Encrypt telemetry with AES-256-GCM using derived PQC session key */
-    ret = pqc_aes_gcm_encrypt(s_shared_secret,
-                              PQC_AES_KEY_SIZE,
-                              iv,
-                              PQC_AES_GCM_IV_SIZE,
-                              NULL, 0,
-                              (const uint8_t *)telemetry_str,
-                              plain_len,
-                              ciphertext,
-                              tag,
-                              PQC_AES_GCM_TAG_SIZE);
-    if (ret != 0) {
-        printf("[-] AES-256-GCM encryption failed: %d\n", ret);
-        return ret;
-    }
-
-    uint16_t total_payload_len = PQC_AES_GCM_IV_SIZE + PQC_AES_GCM_TAG_SIZE + plain_len;
     s_telemetry_counter++;
 
-    printf("[CLIENT] Transmitting Encrypted Telemetry #%u (%u bytes plain, %u bytes wire)\n",
-           (unsigned int)s_telemetry_counter, (unsigned int)plain_len, total_payload_len);
+    printf("[CLIENT] Transmitting Encrypted Telemetry #%u via DTLS (%u bytes plain)\n",
+           (unsigned int)s_telemetry_counter, (unsigned int)plain_len);
     printf("         Plaintext preview: \"%s\"\n", telemetry_str);
 
-    return net_client_send_msg(PQC_MSG_SECURE_PAYLOAD, packet_buf, total_payload_len);
+    int ret = wolfSSL_write(s_ssl, telemetry_str, (int)plain_len);
+    if (ret <= 0) {
+        int err = wolfSSL_get_error(s_ssl, ret);
+        printf("[-] DTLS write failed: %d\n", err);
+        return -1;
+    }
+
+    /* Try to read any pending server response */
+    char rx_buf[256];
+    ret = wolfSSL_read(s_ssl, rx_buf, sizeof(rx_buf) - 1);
+    if (ret > 0) {
+        rx_buf[ret] = '\0';
+        printf("[CLIENT] Received DTLS Payload: %s\n", rx_buf);
+    }
+
+    return 0;
 }

@@ -32,6 +32,7 @@
 /* AES-GCM */
 #define HAVE_AESGCM
 #define WOLFSSL_SHA256
+#define WOLFSSL_SHA512
 
 /* HKDF */
 #define HAVE_HKDF

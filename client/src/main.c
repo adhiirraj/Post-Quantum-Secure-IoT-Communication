@@ -81,7 +81,6 @@ int main(void)
         printf("[-] Network initialization failed!\n");
         return 1;
     }
-    net_client_set_rx_callback(client_pqc_on_rx_msg);
 
     /* 2. PQC Crypto initialization */
     printf("[INIT] Initializing Post-Quantum Cryptography engine...\n");

@@ -17,9 +17,10 @@ static uint32_t s_local_ip;
 static uint32_t s_server_ip;
 static uint16_t s_server_port;
 static uint16_t s_local_port;
-static uint32_t s_tx_seq = 1;
 
-static net_client_rx_callback_t s_rx_callback = NULL;
+#define RX_BUFFER_SIZE 2048
+static uint8_t rx_buffer[RX_BUFFER_SIZE];
+static uint16_t rx_len = 0;
 
 static void udp_rx_handler(uint32_t src_ip, uint16_t src_port, uint16_t dst_port, void *data, uint32_t length)
 {
@@ -27,30 +28,14 @@ static void udp_rx_handler(uint32_t src_ip, uint16_t src_port, uint16_t dst_port
         return;
     }
 
-    if (length < sizeof(pqc_header_t)) {
+    if (length > RX_BUFFER_SIZE) {
+        printf("[-] UDP RX dropped, too large: %u\n", (unsigned int)length);
         return;
     }
-
-    const pqc_header_t *hdr = (const pqc_header_t *)data;
-
-    /* Validate magic and protocol version */
-    if (hdr->magic != PQC_PROTOCOL_MAGIC) {
-        return;
-    }
-
-    if (hdr->version != PQC_PROTOCOL_VERSION) {
-        return;
-    }
-
-    uint16_t payload_len = hdr->payload_len;
-    if ((uint32_t)(sizeof(pqc_header_t) + payload_len) > length) {
-        return;
-    }
-
-    const uint8_t *payload = (const uint8_t *)data + sizeof(pqc_header_t);
-
-    if (s_rx_callback) {
-        s_rx_callback(hdr->msg_type, payload, payload_len, hdr->seq_num);
+    
+    if (rx_len == 0) {
+        memcpy(rx_buffer, data, length);
+        rx_len = length;
     }
 }
 
@@ -74,39 +59,40 @@ int net_client_init(const uint8_t *mac,
     return 0;
 }
 
-void net_client_set_rx_callback(net_client_rx_callback_t cb)
-{
-    s_rx_callback = cb;
-}
-
 int net_client_resolve_server(void)
 {
     return udp_arp_resolve(s_server_ip);
 }
 
-int net_client_send_msg(uint8_t msg_type,
-                        const void *payload,
-                        uint16_t payload_len)
+int net_client_send_raw(const void *payload, uint16_t payload_len)
 {
     void *tx_buf = udp_get_tx_buffer();
     if (!tx_buf) return -1;
 
-    pqc_header_t *hdr = (pqc_header_t *)tx_buf;
-    hdr->magic       = PQC_PROTOCOL_MAGIC;
-    hdr->version     = PQC_PROTOCOL_VERSION;
-    hdr->msg_type    = msg_type;
-    hdr->payload_len = payload_len;
-    hdr->seq_num     = s_tx_seq++;
-
     if (payload && payload_len > 0) {
-        memcpy((uint8_t *)tx_buf + sizeof(pqc_header_t), payload, payload_len);
+        memcpy(tx_buf, payload, payload_len);
     }
 
-    uint32_t total_len = sizeof(pqc_header_t) + payload_len;
-    int ret = udp_send(s_local_port, s_server_port, total_len);
+    int ret = udp_send(s_local_port, s_server_port, payload_len);
     if (!ret) return -2;
 
     return (int)payload_len;
+}
+
+int net_client_recv_raw(void *payload, uint16_t max_len)
+{
+    if (rx_len == 0) {
+        return -1;
+    }
+
+    uint16_t copy_len = rx_len > max_len ? max_len : rx_len;
+    memcpy(payload, rx_buffer, copy_len);
+    
+    // In DTLS, each UDP datagram is a record or fragment. We consume the whole datagram.
+    int ret_len = copy_len;
+    rx_len = 0; // Clear buffer
+    
+    return ret_len;
 }
 
 void net_client_service(void)

@@ -48,6 +48,22 @@ class PQCHostCrypto:
         self.lib.pqc_kem_free_key.argtypes = [ctypes.c_void_p]
         self.lib.pqc_kem_free_key.restype = None
 
+        # ML-DSA-44 Signatures
+        self.lib.mldsa44_keygen.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        self.lib.mldsa44_keygen.restype = ctypes.c_int
+
+        self.lib.mldsa44_sign.argtypes = [
+            ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t,
+            ctypes.c_char_p, ctypes.POINTER(ctypes.c_size_t)
+        ]
+        self.lib.mldsa44_sign.restype = ctypes.c_int
+
+        self.lib.mldsa44_verify.argtypes = [
+            ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t,
+            ctypes.c_char_p, ctypes.c_size_t
+        ]
+        self.lib.mldsa44_verify.restype = ctypes.c_int
+
         # Initialize RNG
         self._rng = WC_RNG()
         ret = self.lib.pqc_kem_rng_init(ctypes.byref(self._rng))

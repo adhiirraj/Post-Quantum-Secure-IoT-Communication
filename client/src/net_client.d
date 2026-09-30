@@ -9,7 +9,6 @@ src/net_client.o: src/net_client.c include/net_client.h \
  /home/asus/pqc/Constraint_Env_Sim/pythondata-software-picolibc/pythondata_software_picolibc/data/libc/include/sys/_stdint.h \
  /home/asus/pqc/Constraint_Env_Sim/pythondata-software-picolibc/pythondata_software_picolibc/data/libc/include/sys/_intsup.h \
  /usr/lib/gcc/riscv64-unknown-elf/14.2.0/include/stddef.h \
- ../common/protocol.h \
  /home/asus/pqc/Constraint_Env_Sim/pythondata-software-picolibc/pythondata_software_picolibc/data/libc/include/stdio.h \
  /usr/lib/gcc/riscv64-unknown-elf/14.2.0/include/stdarg.h \
  /home/asus/pqc/Constraint_Env_Sim/pythondata-software-picolibc/pythondata_software_picolibc/data/libc/include/sys/lock.h \
@@ -38,7 +37,6 @@ include/net_client.h:
 /home/asus/pqc/Constraint_Env_Sim/pythondata-software-picolibc/pythondata_software_picolibc/data/libc/include/sys/_stdint.h:
 /home/asus/pqc/Constraint_Env_Sim/pythondata-software-picolibc/pythondata_software_picolibc/data/libc/include/sys/_intsup.h:
 /usr/lib/gcc/riscv64-unknown-elf/14.2.0/include/stddef.h:
-../common/protocol.h:
 /home/asus/pqc/Constraint_Env_Sim/pythondata-software-picolibc/pythondata_software_picolibc/data/libc/include/stdio.h:
 /usr/lib/gcc/riscv64-unknown-elf/14.2.0/include/stdarg.h:
 /home/asus/pqc/Constraint_Env_Sim/pythondata-software-picolibc/pythondata_software_picolibc/data/libc/include/sys/lock.h:
